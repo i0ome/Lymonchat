@@ -1,0 +1,24 @@
+name: lymon_chat_app
+description: "A new Flutter project for Lymon Chat."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  firebase_core: ^2.24.0
+  firebase_database: ^10.3.8
+  image_picker: ^1.0.4
+  record: ^5.0.4
+  audioplayers: ^5.2.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
