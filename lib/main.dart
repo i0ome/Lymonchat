@@ -1,81 +1,203 @@
+// ============================================================
+// Lymon — تطبيق مراسلة (Flutter / Dart) في ملف واحد
+// الخادم: نفس Google Apps Script (backend/Code.gs) بدون أي تعديل.
+//
+// pubspec.yaml → dependencies:
+//   http: ^1.2.2
+//   shared_preferences: ^2.3.2
+//   record: ^5.1.2
+//   audioplayers: ^6.1.0
+//   path_provider: ^2.1.4
+//
+// Android: في AndroidManifest.xml أضف
+//   <uses-permission android:name="android.permission.INTERNET"/>
+//   <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+// وفي android/app/build.gradle اجعل minSdkVersion 23 على الأقل.
+// ============================================================
+
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/material.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_database/firebase_database.dart';
-import 'package:image_picker/image_picker.dart';
-import 'package:record/record.dart';
+
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  
-  await Firebase.initializeApp(
-    options: const FirebaseOptions(
-      apiKey: "ضع_هنا_API_KEY_الحقيقي",
-      appId: "ضع_هنا_APP_ID_الحقيقي",
-      messagingSenderId: "ضع_هنا_SENDER_ID_الحقيقي",
-      projectId: "cinemazone-ba49d",
-      databaseURL: "https://cinemazone-ba49d-default-rtdb.europe-west1.firebasedatabase.app",
-    ),
-  );
+/// ضع هنا رابط Apps Script (ينتهي بـ /exec)
+const String kApiUrl = 'https://script.google.com/macros/s/REPLACE_ME/exec';
 
-  runApp(const LymonApp());
+const kBg = Color(0xFF0B141A);
+const kS1 = Color(0xFF111B21);
+const kS2 = Color(0xFF202C33);
+const kAccent = Color(0xFF00A884);
+const kGold = Color(0xFFFFC107);
+const kBlue = Color(0xFF1DA1F2);
+const kMine = Color(0xFF005C4B);
+
+// ---------------------------------------------------------------- models
+class Sess {
+  final String token, user;
+  final bool admin;
+  Sess(this.token, this.user, this.admin);
 }
 
-class LymonApp extends StatelessWidget {
-  const LymonApp({Key? key}) : super(key: key);
+class U {
+  final String name, badge;
+  final bool banned;
+  U(this.name, this.badge, this.banned);
+}
+
+class M {
+  final String id, from, to, type, body;
+  final int ts;
+  M(this.id, this.from, this.to, this.type, this.body, this.ts);
+}
+
+// ---------------------------------------------------------------- state/API
+final session = ValueNotifier<Sess?>(null);
+final navKey = GlobalKey<NavigatorState>();
+
+Future<Map<String, dynamic>> _post(Map<String, dynamic> body) async {
+  final client = http.Client();
+  try {
+    final req = http.Request('POST', Uri.parse(kApiUrl))
+      ..followRedirects = false
+      ..headers['Content-Type'] = 'text/plain;charset=utf-8'
+      ..body = jsonEncode(body);
+    var res = await http.Response.fromStream(
+        await client.send(req).timeout(const Duration(seconds: 30)));
+    // Apps Script يرد بتحويل 302، والنتيجة تُجلب بـ GET من العنوان الجديد
+    if ({301, 302, 303, 307, 308}.contains(res.statusCode)) {
+      final loc = res.headers['location'];
+      if (loc == null) return {'ok': false, 'error': 'رد غير صالح'};
+      res = await client.get(Uri.parse(loc)).timeout(const Duration(seconds: 60));
+    }
+    return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+  } catch (_) {
+    return {'ok': false, 'error': 'تعذر الاتصال بالخادم'};
+  } finally {
+    client.close();
+  }
+}
+
+Future<Map<String, dynamic>> call(String action, [Map<String, dynamic>? extra]) async {
+  final r = await _post({
+    'action': action,
+    'token': session.value?.token ?? '',
+    ...?extra,
+  });
+  if (r['ok'] != true && (r['error'] == 'unauthorized' || r['error'] == 'banned')) {
+    if (session.value != null) await logout();
+  }
+  return r;
+}
+
+String errText(dynamic e) {
+  if (e == 'banned') return 'تم حظر هذا الحساب';
+  if (e == 'unauthorized') return 'انتهت الجلسة، سجّل الدخول من جديد';
+  return '${e ?? 'خطأ'}';
+}
+
+Future<void> saveSession(Sess s) async {
+  final p = await SharedPreferences.getInstance();
+  await p.setString('token', s.token);
+  await p.setString('user', s.user);
+  await p.setBool('admin', s.admin);
+  session.value = s;
+}
+
+Future<void> logout() async {
+  final p = await SharedPreferences.getInstance();
+  await p.clear();
+  session.value = null;
+  navKey.currentState?.popUntil((r) => r.isFirst);
+}
+
+// ---------------------------------------------------------------- app
+void main() => runApp(const LymonApp());
+
+class LymonApp extends StatefulWidget {
+  const LymonApp({super.key});
+  @override
+  State<LymonApp> createState() => _LymonAppState();
+}
+
+class _LymonAppState extends State<LymonApp> {
+  bool loaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    SharedPreferences.getInstance().then((p) {
+      final t = p.getString('token');
+      if (t != null) {
+        session.value = Sess(t, p.getString('user') ?? '', p.getBool('admin') ?? false);
+      }
+      setState(() => loaded = true);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Lymon Chat',
+      title: 'Lymon',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF080C14),
-        cardColor: const Color(0xFF121927),
-        colorScheme: const ColorScheme.dark(
-          primary: Color(0xFFA3E635),
-          secondary: Color(0xFFF59E0B),
-        ),
+      navigatorKey: navKey,
+      theme: ThemeData(
+        useMaterial3: true,
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: kBg,
+        colorScheme: const ColorScheme.dark(primary: kAccent, surface: kS1),
+        appBarTheme: const AppBarTheme(backgroundColor: kS1),
+        drawerTheme: const DrawerThemeData(backgroundColor: kS1),
       ),
-      home: const AuthLockScreen(),
+      builder: (c, child) => Directionality(textDirection: TextDirection.rtl, child: child!),
+      home: !loaded
+          ? const Scaffold(body: Center(child: CircularProgressIndicator()))
+          : ValueListenableBuilder<Sess?>(
+              valueListenable: session,
+              builder: (_, s, __) => s == null ? const AuthPage() : HomePage(key: ValueKey(s.token)),
+            ),
     );
   }
 }
 
-class AuthLockScreen extends StatefulWidget {
-  const AuthLockScreen({Key? key}) : super(key: key);
-
+class VerifiedBadge extends StatelessWidget {
+  final String badge;
+  const VerifiedBadge(this.badge, {super.key});
   @override
-  _AuthLockScreenState createState() => _AuthLockScreenState();
+  Widget build(BuildContext context) => badge.isEmpty
+      ? const SizedBox.shrink()
+      : Padding(
+          padding: const EdgeInsetsDirectional.only(start: 4),
+          child: Icon(Icons.verified, size: 18, color: badge == 'gold' ? kGold : kBlue),
+        );
 }
 
-class _AuthLockScreenState extends State<AuthLockScreen> {
-  final TextEditingController _usernameController = TextEditingController();
-  final TextEditingController _passwordController = TextEditingController();
-  bool isRegister = false;
+// ---------------------------------------------------------------- auth
+class AuthPage extends StatefulWidget {
+  const AuthPage({super.key});
+  @override
+  State<AuthPage> createState() => _AuthPageState();
+}
 
-  void _login() {
-    String username = _usernameController.text.trim();
-    String password = _passwordController.text.trim();
+class _AuthPageState extends State<AuthPage> {
+  final u = TextEditingController(), p = TextEditingController();
+  bool reg = false, busy = false;
+  String? err;
 
-    if (username.isEmpty || password.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('يرجى كتابة اسم المستخدم وكلمة المرور')),
-      );
-      return;
+  Future<void> submit() async {
+    setState(() { busy = true; err = null; });
+    final r = await call(reg ? 'register' : 'login', {'username': u.text.trim(), 'password': p.text});
+    if (!mounted) return;
+    if (r['ok'] == true) {
+      await saveSession(Sess(r['token'], r['username'], r['admin'] == true));
+    } else {
+      setState(() { err = errText(r['error']); busy = false; });
     }
-
-    FirebaseDatabase.instance.ref('users/$username').update({
-      'username': username,
-      'lastSeen': ServerValue.timestamp,
-    });
-
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (context) => MainChatScreen(currentUsername: username)),
-    );
   }
 
   @override
@@ -83,420 +205,351 @@ class _AuthLockScreenState extends State<AuthLockScreen> {
     return Scaffold(
       body: Center(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24.0),
-          child: Container(
-            padding: const EdgeInsets.all(24.0),
-            decoration: BoxDecoration(
-              color: const Color(0xFF121927),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: const Color(0xFF1E293B)),
+          padding: const EdgeInsets.all(28),
+          child: Column(children: [
+            const Text('Lymon', style: TextStyle(fontSize: 40, fontWeight: FontWeight.bold, color: kAccent)),
+            const SizedBox(height: 4),
+            Text(reg ? 'إنشاء حساب جديد' : 'تسجيل الدخول', style: const TextStyle(color: Colors.grey)),
+            const SizedBox(height: 28),
+            TextField(controller: u, decoration: const InputDecoration(labelText: 'اسم المستخدم', border: OutlineInputBorder())),
+            const SizedBox(height: 12),
+            TextField(controller: p, obscureText: true, decoration: const InputDecoration(labelText: 'كلمة المرور', border: OutlineInputBorder())),
+            if (err != null) Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Text(err!, style: const TextStyle(color: Colors.redAccent)),
             ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                RichText(
-                  text: const TextSpan(
-                    style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.white),
-                    children: [
-                      TextSpan(text: 'lym'),
-                      TextSpan(text: 'o', style: TextStyle(color: Color(0xFFA3E635))),
-                      TextSpan(text: 'n Chat'),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  isRegister ? 'إنشاء حساب جديد' : 'تسجيل الدخول للمتابعة',
-                  style: const TextStyle(color: Colors.white54, fontSize: 14),
-                ),
-                const SizedBox(height: 20),
-                TextField(
-                  controller: _usernameController,
-                  decoration: const InputDecoration(labelText: 'اسم المستخدم', border: OutlineInputBorder()),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _passwordController,
-                  obscureText: true,
-                  decoration: const InputDecoration(labelText: 'كلمة المرور', border: OutlineInputBorder()),
-                ),
-                const SizedBox(height: 20),
-                SizedBox(
-                  width: double.infinity,
-                  height: 48,
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFFA3E635),
-                      foregroundColor: Colors.black,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                    ),
-                    onPressed: _login,
-                    child: const Text('دخول إلى الشات 🚀', style: TextStyle(fontWeight: FontWeight.bold)),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                GestureDetector(
-                  onTap: () => setState(() => isRegister = !isRegister),
-                  child: Text(
-                    isRegister ? 'لديك حساب بالفعل؟ تسجيل الدخول' : 'ليس لديك حساب؟ إنشاء حساب جديد',
-                    style: const TextStyle(color: Color(0xFFA3E635), fontSize: 13),
-                  ),
-                ),
-              ],
+            const SizedBox(height: 20),
+            SizedBox(
+              width: double.infinity, height: 50,
+              child: FilledButton(
+                onPressed: busy ? null : submit,
+                child: busy
+                    ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2))
+                    : Text(reg ? 'إنشاء الحساب' : 'دخول'),
+              ),
             ),
-          ),
+            TextButton(
+              onPressed: () => setState(() { reg = !reg; err = null; }),
+              child: Text(reg ? 'لدي حساب بالفعل' : 'ليس لدي حساب؟ سجّل الآن'),
+            ),
+          ]),
         ),
       ),
     );
   }
 }
 
-class MainChatScreen extends StatefulWidget {
-  final String currentUsername;
-  const MainChatScreen({Key? key, required this.currentUsername}) : super(key: key);
-
+// ---------------------------------------------------------------- home
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
   @override
-  _MainChatScreenState createState() => _MainChatScreenState();
+  State<HomePage> createState() => _HomePageState();
 }
 
-class _MainChatScreenState extends State<MainChatScreen> {
-  int _currentTab = 0;
-  final TextEditingController _searchController = TextEditingController();
-  String? searchResultUser;
+class _HomePageState extends State<HomePage> {
+  List<U> users = [];
+  String tab = 'chats';
+  bool loading = true;
 
-  void _searchUser() async {
-    String q = _searchController.text.trim();
-    if (q.isEmpty) return;
+  @override
+  void initState() { super.initState(); load(); }
 
-    DataSnapshot snap = await FirebaseDatabase.instance.ref('users/$q').get();
-    setState(() {
-      if (snap.exists) {
-        searchResultUser = q;
-      } else {
-        searchResultUser = null;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('لم يتم العثور على حساب بهذا الاسم')),
+  Future<void> load() async {
+    final r = await call('users');
+    if (!mounted) return;
+    if (r['ok'] == true) {
+      users = (r['users'] as List)
+          .map((o) => U(o['username'], (o['badge'] ?? '') as String, o['banned'] == true))
+          .toList();
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(errText(r['error']))));
+    }
+    setState(() => loading = false);
+  }
+
+  Future<void> adminOp(String op, String name) async {
+    final r = await call(op, {'target': name});
+    if (r['ok'] != true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(errText(r['error']))));
+    }
+    load();
+  }
+
+  Widget avatar(String n) => CircleAvatar(
+        backgroundColor: kS2,
+        child: Text(n.isEmpty ? '?' : n[0].toUpperCase(), style: const TextStyle(color: kAccent, fontWeight: FontWeight.bold)),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final s = session.value!;
+    final isAdminTab = tab == 'admin' && s.admin;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(isAdminTab ? 'لوحة الإشراف' : 'Lymon', style: const TextStyle(fontWeight: FontWeight.bold)),
+        actions: [IconButton(icon: const Icon(Icons.refresh), onPressed: load)],
+      ),
+      drawer: Drawer(
+        child: SafeArea(
+          child: ListView(children: [
+            Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('Lymon', style: TextStyle(fontSize: 28, color: kAccent, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                Row(children: [
+                  Text(s.user, style: const TextStyle(fontWeight: FontWeight.bold)),
+                  if (s.admin) const VerifiedBadge('gold'),
+                ]),
+              ]),
+            ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.chat), title: const Text('المحادثات'),
+              selected: tab == 'chats',
+              onTap: () { setState(() => tab = 'chats'); Navigator.pop(context); },
+            ),
+            // يظهر فقط إذا أكّد الخادم أن الجلسة جلسة مشرف
+            if (s.admin) ListTile(
+              leading: const Icon(Icons.admin_panel_settings, color: kGold), title: const Text('لوحة الإشراف'),
+              selected: tab == 'admin',
+              onTap: () { setState(() => tab = 'admin'); Navigator.pop(context); load(); },
+            ),
+            ListTile(
+              leading: const Icon(Icons.logout), title: const Text('تسجيل الخروج'),
+              onTap: logout,
+            ),
+          ]),
+        ),
+      ),
+      body: loading
+          ? const Center(child: CircularProgressIndicator())
+          : isAdminTab ? adminList() : chatList(),
+    );
+  }
+
+  Widget chatList() {
+    final list = users.where((u) => !u.banned).toList();
+    if (list.isEmpty) return const Center(child: Text('لا يوجد مستخدمون بعد', style: TextStyle(color: Colors.grey)));
+    return RefreshIndicator(
+      onRefresh: load,
+      child: ListView.separated(
+        itemCount: list.length,
+        separatorBuilder: (_, __) => const Divider(height: 1, color: kS2),
+        itemBuilder: (_, i) {
+          final u = list[i];
+          return ListTile(
+            leading: avatar(u.name),
+            title: Row(children: [Text(u.name), VerifiedBadge(u.badge)]),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => ChatPage(peer: u))),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget adminList() {
+    final list = users.where((u) => u.badge != 'gold').toList();
+    if (list.isEmpty) return const Center(child: Text('لا يوجد مستخدمون', style: TextStyle(color: Colors.grey)));
+    return ListView.separated(
+      itemCount: list.length,
+      separatorBuilder: (_, __) => const Divider(height: 1, color: kS2),
+      itemBuilder: (_, i) {
+        final u = list[i];
+        return Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              avatar(u.name), const SizedBox(width: 12),
+              Text(u.name, style: const TextStyle(fontWeight: FontWeight.w600)),
+              VerifiedBadge(u.badge),
+              if (u.banned) const Padding(
+                padding: EdgeInsetsDirectional.only(start: 8),
+                child: Text('محظور', style: TextStyle(color: Colors.redAccent)),
+              ),
+            ]),
+            const SizedBox(height: 8),
+            Wrap(spacing: 8, children: [
+              OutlinedButton(
+                onPressed: () => adminOp(u.banned ? 'unban' : 'ban', u.name),
+                child: Text(u.banned ? 'فك الحظر' : 'حظر'),
+              ),
+              OutlinedButton(
+                onPressed: () => adminOp(u.badge == 'blue' ? 'unverify' : 'verify', u.name),
+                child: Text(u.badge == 'blue' ? 'إلغاء التوثيق' : 'توثيق ✓'),
+              ),
+            ]),
+          ]),
         );
-      }
+      },
+    );
+  }
+}
+
+// ---------------------------------------------------------------- chat
+class ChatPage extends StatefulWidget {
+  final U peer;
+  const ChatPage({super.key, required this.peer});
+  @override
+  State<ChatPage> createState() => _ChatPageState();
+}
+
+class _ChatPageState extends State<ChatPage> {
+  final msgs = <M>[];
+  final ctrl = TextEditingController();
+  final scroll = ScrollController();
+  final rec = AudioRecorder();
+  final player = AudioPlayer();
+  Timer? timer;
+  int since = 0;
+  bool recording = false;
+
+  @override
+  void initState() {
+    super.initState();
+    poll();
+    timer = Timer.periodic(const Duration(seconds: 3), (_) => poll());
+  }
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    ctrl.dispose();
+    scroll.dispose();
+    rec.dispose();
+    player.dispose();
+    super.dispose();
+  }
+
+  Future<void> poll() async {
+    final r = await call('poll', {'peer': widget.peer.name, 'since': since});
+    if (!mounted || r['ok'] != true) return;
+    final known = msgs.map((m) => m.id).toSet();
+    final fresh = (r['messages'] as List)
+        .map((o) => M(o['id'], o['from'], o['to'], o['type'], '${o['body']}', (o['ts'] as num).toInt()))
+        .where((m) => !known.contains(m.id))
+        .toList();
+    if (fresh.isEmpty) return;
+    setState(() {
+      msgs.addAll(fresh);
+      since = msgs.map((m) => m.ts).reduce((a, b) => a > b ? a : b);
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (scroll.hasClients) scroll.animateTo(scroll.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
     });
   }
 
-  void _openChat(String targetName, bool isGroup) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => ConversationScreen(
-          currentUsername: widget.currentUsername,
-          targetName: targetName,
-          isGroup: isGroup,
-        ),
-      ),
-    );
+  void toast(String t) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t)));
+
+  Future<void> send(String type, String body) async {
+    final r = await call('send', {'to': widget.peer.name, 'type': type, 'body': body});
+    if (r['ok'] != true) { if (mounted) toast(errText(r['error'])); return; }
+    poll();
+  }
+
+  Future<void> onAction() async {
+    if (recording) {
+      final path = await rec.stop();
+      setState(() => recording = false);
+      if (path == null) return;
+      final bytes = await File(path).readAsBytes();
+      if (bytes.length > 3000000) { toast('التسجيل كبير جداً'); return; }
+      await send('voice', base64Encode(bytes));
+      File(path).delete().catchError((_) => File(path));
+    } else if (ctrl.text.trim().isNotEmpty) {
+      final t = ctrl.text.trim();
+      ctrl.clear();
+      setState(() {});
+      await send('text', t);
+    } else {
+      if (!await rec.hasPermission()) { toast('اسمح بالوصول للمايكروفون'); return; }
+      final dir = await getTemporaryDirectory();
+      final path = '${dir.path}/rec_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      await rec.start(const RecordConfig(encoder: AudioEncoder.aacLc, bitRate: 32000, sampleRate: 16000), path: path);
+      setState(() => recording = true);
+    }
+  }
+
+  Future<void> play(M m) async {
+    final r = await call('media', {'id': m.id});
+    if (r['ok'] != true) { if (mounted) toast(errText(r['error'])); return; }
+    final dir = await getTemporaryDirectory();
+    final f = File('${dir.path}/play_${m.id}.m4a');
+    await f.writeAsBytes(base64Decode(r['data']));
+    await player.stop();
+    await player.play(DeviceFileSource(f.path));
   }
 
   @override
   Widget build(BuildContext context) {
+    final me = session.value?.user ?? '';
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('lymOn Chat', style: TextStyle(fontWeight: FontWeight.bold)),
-        backgroundColor: const Color(0xFF121927),
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(48),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              TextButton(
-                onPressed: () => setState(() => _currentTab = 0),
-                child: Text('خاص', style: TextStyle(color: _currentTab == 0 ? const Color(0xFFA3E635) : Colors.white54, fontWeight: FontWeight.bold)),
-              ),
-              TextButton(
-                onPressed: () => setState(() => _currentTab = 1),
-                child: Text('قروبات', style: TextStyle(color: _currentTab == 1 ? const Color(0xFFA3E635) : Colors.white54, fontWeight: FontWeight.bold)),
-              ),
-            ],
+      appBar: AppBar(title: Row(children: [Text(widget.peer.name), VerifiedBadge(widget.peer.badge)])),
+      body: Column(children: [
+        Expanded(
+          child: ListView.builder(
+            controller: scroll,
+            padding: const EdgeInsets.all(10),
+            itemCount: msgs.length,
+            itemBuilder: (_, i) {
+              final m = msgs[i];
+              final mine = m.from == me;
+              return Align(
+                alignment: mine ? AlignmentDirectional.centerEnd : AlignmentDirectional.centerStart,
+                child: Container(
+                  margin: const EdgeInsets.symmetric(vertical: 3),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  constraints: const BoxConstraints(maxWidth: 280),
+                  decoration: BoxDecoration(color: mine ? kMine : kS2, borderRadius: BorderRadius.circular(14)),
+                  child: m.type == 'voice'
+                      ? Row(mainAxisSize: MainAxisSize.min, children: [
+                          InkWell(onTap: () => play(m), child: const Icon(Icons.play_arrow)),
+                          const SizedBox(width: 6),
+                          const Text('رسالة صوتية'),
+                        ])
+                      : Text(m.body),
+                ),
+              );
+            },
           ),
         ),
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _searchController,
-                    decoration: const InputDecoration(
-                      hintText: '🔍 ابحث عن اسم مستخدم...',
-                      border: OutlineInputBorder(),
-                      contentPadding: EdgeInsets.symmetric(horizontal: 12),
-                    ),
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.search, color: Color(0xFFA3E635)),
-                  onPressed: _searchUser,
-                ),
-              ],
-            ),
-            if (searchResultUser != null) ...[
-              const SizedBox(height: 10),
-              ListTile(
-                tileColor: const Color(0xFF121927),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                leading: const CircleAvatar(backgroundColor: Color(0xFFA3E635), child: Icon(Icons.person, color: Colors.black)),
-                title: Text(searchResultUser!),
-                subtitle: const Text('انقر لبدء المحادثة', style: TextStyle(color: Color(0xFFA3E635), fontSize: 12)),
-                onTap: () => _openChat(searchResultUser!, false),
-              ),
-            ],
-            const SizedBox(height: 16),
-            Expanded(
-              child: _currentTab == 0
-                  ? StreamBuilder(
-                      stream: FirebaseDatabase.instance.ref('chats/${widget.currentUsername}').onValue,
-                      builder: (context, AsyncSnapshot<DatabaseEvent> snapshot) {
-                        if (!snapshot.hasData || snapshot.data!.snapshot.value == null) {
-                          return const Center(child: Text('لا توجد محادثات خاصة بعد', style: TextStyle(color: Colors.white54)));
-                        }
-                        Map<dynamic, dynamic> chats = snapshot.data!.snapshot.value as Map<dynamic, dynamic>;
-                        List<String> targets = chats.keys.cast<String>().toList();
-
-                        return ListView.builder(
-                          itemCount: targets.length,
-                          itemBuilder: (context, index) {
-                            return Card(
-                              color: const Color(0xFF121927),
-                              child: ListTile(
-                                leading: const CircleAvatar(child: Icon(Icons.person)),
-                                title: Text(targets[index]),
-                                subtitle: const Text('محادثة خاصة متصلة لحظياً مع الويب'),
-                                onTap: () => _openChat(targets[index], false),
-                              ),
-                            );
-                          },
-                        );
-                      },
-                    )
-                  : StreamBuilder(
-                      stream: FirebaseDatabase.instance.ref('groups').onValue,
-                      builder: (context, AsyncSnapshot<DatabaseEvent> snapshot) {
-                        if (!snapshot.hasData || snapshot.data!.snapshot.value == null) {
-                          return const Center(child: Text('لا توجد قروبات حالياً', style: TextStyle(color: Colors.white54)));
-                        }
-                        Map<dynamic, dynamic> groups = snapshot.data!.snapshot.value as Map<dynamic, dynamic>;
-
-                        return ListView(
-                          children: groups.entries.map((e) {
-                            return Card(
-                              color: const Color(0xFF121927),
-                              child: ListTile(
-                                leading: const CircleAvatar(backgroundColor: Colors.blue, child: Icon(Icons.group, color: Colors.white)),
-                                title: Text(e.value['name'] ?? 'قروب'),
-                                subtitle: const Text('قروب جماعي'),
-                                onTap: () => _openChat(e.key, true),
-                              ),
-                            );
-                          }).toList(),
-                        );
-                      },
-                    ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class ConversationScreen extends StatefulWidget {
-  final String currentUsername;
-  final String targetName;
-  final bool isGroup;
-
-  const ConversationScreen({
-    Key? key,
-    required this.currentUsername,
-    required this.targetName,
-    required this.isGroup,
-  }) : super(key: key);
-
-  @override
-  _ConversationScreenState createState() => _ConversationScreenState();
-}
-
-class _ConversationScreenState extends State<ConversationScreen> {
-  final TextEditingController _msgController = TextEditingController();
-  final AudioRecorder _audioRecorder = AudioRecorder();
-  final AudioPlayer _audioPlayer = AudioPlayer();
-  bool isRecording = false;
-
-  String get _chatPath {
-    if (widget.isGroup) {
-      return 'group_messages/${widget.targetName}';
-    } else {
-      List<String> ids = [widget.currentUsername, widget.targetName]..sort();
-      return 'messages/${ids[0]}_${ids[1]}';
-    }
-  }
-
-  void _sendMessage({required String type, required String content}) {
-    DatabaseReference ref = FirebaseDatabase.instance.ref(_chatPath).push();
-    ref.set({
-      'sender': widget.currentUsername,
-      'type': type,
-      if (type == 'text') 'text': content,
-      if (type != 'text') 'mediaUrl': content,
-      'timestamp': ServerValue.timestamp,
-    });
-
-    if (!widget.isGroup) {
-      FirebaseDatabase.instance.ref('chats/${widget.currentUsername}/${widget.targetName}').set(true);
-      FirebaseDatabase.instance.ref('chats/${widget.targetName}/${widget.currentUsername}').set(true);
-    }
-  }
-
-  void _pickImage() async {
-    final ImagePicker picker = ImagePicker();
-    final XFile? image = await picker.pickImage(source: ImageSource.gallery, imageQuality: 50);
-    if (image != null) {
-      List<int> bytes = await File(image.path).readAsBytes();
-      String base64Image = "data:image/png;base64,${base64Encode(bytes)}";
-      _sendMessage(type: 'image', content: base64Image);
-    }
-  }
-
-  void _toggleRecording() async {
-    if (isRecording) {
-      final path = await _audioRecorder.stop();
-      if (path != null) {
-        List<int> bytes = await File(path).readAsBytes();
-        String base64Audio = "data:audio/webm;base64,${base64Encode(bytes)}";
-        _sendMessage(type: 'audio', content: base64Audio);
-      }
-      setState(() => isRecording = false);
-    } else {
-      if (await _audioRecorder.hasPermission()) {
-        await _audioRecorder.start(const RecordConfig(), path: '');
-        setState(() => isRecording = true);
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.targetName),
-        backgroundColor: const Color(0xFF121927),
-      ),
-      body: Column(
-        children: [
-          Expanded(
-            child: StreamBuilder(
-              stream: FirebaseDatabase.instance.ref(_chatPath).onValue,
-              builder: (context, AsyncSnapshot<DatabaseEvent> snapshot) {
-                if (!snapshot.hasData || snapshot.data!.snapshot.value == null) {
-                  return const Center(child: Text('اكتب أول رسالة للبدء...', style: TextStyle(color: Colors.white54)));
-                }
-
-                Map<dynamic, dynamic> msgs = snapshot.data!.snapshot.value as Map<dynamic, dynamic>;
-                var sortedKeys = msgs.keys.toList()..sort();
-
-                return ListView.builder(
-                  itemCount: sortedKeys.length,
-                  itemBuilder: (context, index) {
-                    var m = msgs[sortedKeys[index]];
-                    bool isMe = m['sender'] == widget.currentUsername;
-
-                    return Align(
-                      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-                      child: Container(
-                        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 12),
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: isMe ? const Color(0xFFA3E635) : const Color(0xFF121927),
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (widget.isGroup && !isMe)
-                              Text(m['sender'] ?? '', style: const TextStyle(color: Colors.blueAccent, fontSize: 10, fontWeight: FontWeight.bold)),
-                            _buildMessageContent(m, isMe),
-                          ],
+        Container(
+          color: kS1,
+          padding: const EdgeInsets.all(8),
+          child: SafeArea(
+            top: false,
+            child: Row(children: [
+              Expanded(
+                child: recording
+                    ? const Padding(
+                        padding: EdgeInsets.all(12),
+                        child: Text('● جارٍ التسجيل… اضغط للإرسال', style: TextStyle(color: Colors.redAccent)),
+                      )
+                    : TextField(
+                        controller: ctrl,
+                        onChanged: (_) => setState(() {}),
+                        minLines: 1, maxLines: 4,
+                        decoration: InputDecoration(
+                          hintText: 'اكتب رسالة',
+                          filled: true, fillColor: kS2,
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
                         ),
                       ),
-                    );
-                  },
-                );
-              },
-            ),
+              ),
+              const SizedBox(width: 8),
+              CircleAvatar(
+                backgroundColor: kAccent,
+                child: IconButton(
+                  color: Colors.white,
+                  icon: Icon(recording || ctrl.text.trim().isNotEmpty ? Icons.send : Icons.mic),
+                  onPressed: onAction,
+                ),
+              ),
+            ]),
           ),
-          Container(
-            padding: const EdgeInsets.all(8),
-            color: const Color(0xFF121927),
-            child: Row(
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.image, color: Colors.white),
-                  onPressed: _pickImage,
-                ),
-                IconButton(
-                  icon: Icon(Icons.mic, color: isRecording ? Colors.red : Colors.white),
-                  onPressed: _toggleRecording,
-                ),
-                Expanded(
-                  child: TextField(
-                    controller: _msgController,
-                    decoration: const InputDecoration(
-                      hintText: 'اكتب رسالتك...',
-                      border: InputBorder.none,
-                    ),
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.send, color: Color(0xFFA3E635)),
-                  onPressed: () {
-                    if (_msgController.text.trim().isNotEmpty) {
-                      _sendMessage(type: 'text', content: _msgController.text.trim());
-                      _msgController.clear();
-                    }
-                  },
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+        ),
+      ]),
     );
-  }
-
-  Widget _buildMessageContent(Map<dynamic, dynamic> m, bool isMe) {
-    Color textColor = isMe ? Colors.black : Colors.white;
-    String type = m['type'] ?? 'text';
-
-    if (type == 'text') {
-      return Text(m['text'] ?? '', style: TextStyle(color: textColor, fontSize: 15));
-    } else if (type == 'image') {
-      String url = m['mediaUrl'] ?? '';
-      if (url.startsWith('data:image')) {
-        return Image.memory(base64Decode(url.split(',').last), width: 200, fit: BoxFit.cover);
-      }
-      return Image.network(url, width: 200, fit: BoxFit.cover);
-    } else if (type == 'audio') {
-      return IconButton(
-        icon: Icon(Icons.play_arrow, color: textColor),
-        onPressed: () async {
-          String url = m['mediaUrl'] ?? '';
-          if (url.startsWith('data:audio')) {
-            await _audioPlayer.play(BytesSource(base64Decode(url.split(',').last)));
-          } else {
-            await _audioPlayer.play(UrlSource(url));
-          }
-        },
-      );
-    }
-    return const SizedBox();
   }
 }
