@@ -1,24 +1,24 @@
-name: lymon_chat_app
-description: "A new Flutter project for Lymon Chat."
+name: lymon
+description: Lymon messenger (Flutter + Google Apps Script backend)
 publish_to: 'none'
 version: 1.0.0+1
 
 environment:
-  sdk: '>=3.0.0 <4.0.0'
+  sdk: '>=3.3.0 <4.0.0'
 
 dependencies:
   flutter:
     sdk: flutter
-  firebase_core: ^2.24.0
-  firebase_database: ^10.3.8
-  image_picker: ^1.0.4
-  record: ^5.0.4
-  audioplayers: ^5.2.1
+  http: ^1.2.2
+  shared_preferences: ^2.3.2
+  record: ^5.1.2
+  audioplayers: ^6.1.0
+  path_provider: ^2.1.4
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^3.0.0
+  flutter_lints: ^4.0.0
 
 flutter:
   uses-material-design: true
