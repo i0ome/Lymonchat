@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.Lymon" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#F1F1F1</item>
+        <item name="android:statusBarColor">#F1F1F1</item>
+        <item name="android:navigationBarColor">#F1F1F1</item>
+    </style>
+</resources>
